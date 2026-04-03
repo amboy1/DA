@@ -1,171 +1,129 @@
 #include "patricia.hpp"
+#include <tuple>
+#include <iostream>
+#include <functional>
+#include <queue>
+#include <unordered_set>
+#include <stdexcept>
 
-struct Patricia::Node {
-    std::string key;
-    int value;
-    size_t index; 
-    Node *right, *left;   
+inline bool GetBit(const std::string& s, size_t bitIndex) {
+    size_t byte = bitIndex / 8;
+    if (byte >= s.size()) return 0;
 
-    Node(const std::string& key, const int& value, const int& index)
-        : key(key), value(value), index(index), left(nullptr), right(nullptr) { }
-
-    ~Node(){}
-};
-
-Patricia::Node* Patricia::Search(const std::string& findKey) const{
-    Node *currentNode = root->left, *prevNode = root;
-
-    while(currentNode->index > prevNode->index){
-        // Index of char that we need to check
-        size_t charIndex = (currentNode->index - 1) / BIT_COUNT;
-
-        // findKey is less than need char
-        if(charIndex >= findKey.size()){
-          	// Remember prevNode
-            prevNode = currentNode;
-            // Only '0'
-            currentNode = currentNode->left;
-            continue;
-        }
-
-        char currentChar = findKey[charIndex];
-        // How many times should we shift to the right
-        int offset = (BIT_COUNT - 1 - ((currentNode->index - 1) % BIT_COUNT));
-        // Get current bit
-        bool currentBit = (currentChar >> offset) & 1;
-
-        // Remember prevNode
-        prevNode = currentNode;
-        // If '1' go right, '0' go left
-        currentBit  ? currentNode = currentNode->right
-                   : currentNode = currentNode->left;
-    }
-    return currentNode;
+    unsigned char c = static_cast<unsigned char>(s[byte]);
+    return (c >> (7 - (bitIndex % 8))) & 1;
 }
 
-std::tuple<Patricia::Node*, Patricia::Node*, Patricia::Node*> Patricia::SearchE(const std::string& findKey) const{
+Patricia::SearchResult Patricia::SearchInternal(const std::string& findKey, bool needPrevPrev) const {
+    if(!root) return {nullptr, nullptr, nullptr};
+
     Node *currentNode = root->left, *prevNode = root, *prevPrevNode = root;
+
+    size_t steps = 0;
+    const size_t maxSteps = 1024;
+
     while(currentNode->index > prevNode->index){
-        size_t charIndex = (currentNode->index - 1) / BIT_COUNT;
+        if(++steps > maxSteps)
+            throw std::runtime_error("Patricia invariant broken: search loop");
 
-        // FindKey is less than need char
-        if(charIndex >= findKey.size()){
-            prevPrevNode = prevNode;
-            prevNode = currentNode;
-            // Only '0'
-            currentNode = currentNode->left;
-            continue;
-        }
+        bool currentBit = GetBit(findKey, currentNode->index);
 
-        char currentChar = findKey[charIndex]; // If findkey.size less than currentNode->index
-        int offset = (BIT_COUNT - 1 - ((currentNode->index - 1) % BIT_COUNT));
-        bool currentBit = (currentChar >> offset) & 1;
-
-        // Remember prevNode & prevPrevNove
-        prevPrevNode = prevNode;
+        if(needPrevPrev) prevPrevNode = prevNode;
         prevNode = currentNode;
-        // If '1' go right, '0' go left
-        currentBit  ? currentNode = currentNode->right
-                    : currentNode = currentNode->left;
+        currentNode = currentBit ? currentNode->right : currentNode->left;
     }
 
-    return std::make_tuple(currentNode, prevNode, prevPrevNode);
+    return {currentNode, prevNode, prevPrevNode};
+}
+
+Patricia::Node* Patricia::Search(const std::string& findKey) const {
+    if(!root) return nullptr;
+
+    auto result = SearchInternal(findKey, false);
+
+    if(result.currentNode && result.currentNode->key == findKey)
+        return result.currentNode;
+
+    return nullptr;
+}
+
+std::tuple<Patricia::Node*, Patricia::Node*, Patricia::Node*>
+Patricia::SearchE(const std::string& findKey) const {
+    if(!root) return {nullptr, nullptr, nullptr};
+    auto result = SearchInternal(findKey, true);
+    return std::make_tuple(result.currentNode, result.prevNode, result.prevPrevNode);
+}
+
+static std::pair<Patricia::Node*, Patricia::Node*>
+SearchInsertPlace(Patricia::Node* root, const std::string& key, size_t newIndex) {
+    Patricia::Node* parent = root;
+    Patricia::Node* current = root->left;
+
+    while(current->index > parent->index && current->index < newIndex) {
+        parent = current;
+        bool b = GetBit(key, current->index);
+        current = b ? current->right : current->left;
+    }
+    return {current, parent}; 
 }
 
 void Patricia::Add(const std::string& key, int value){
     if(!root){
         root = new Node(key, value, 0);
         root->left = root;
+        root->right = root;
         return;
     }
 
     Node *foundNode = Search(key);
-    if(foundNode->key == key)
+    if(foundNode) {
         throw std::runtime_error("\t\"" + key + "\" already exist!\n");
-    
-    bool run = true;
-    size_t charIndex = 0;
-    while(run){
-        char foundedKey = (foundNode->key.size() > charIndex ? foundNode->key[charIndex] : '\0');
-        char inputKey   = (key.size() > charIndex ? key[charIndex] : '\0');
-        for(size_t i = 0; i < BIT_COUNT; ++i){
-            bool foundedKeyBit = foundedKey >> (BIT_COUNT - 1 - i) & 1;
-            bool inputKeyBit = inputKey >> (BIT_COUNT - 1 - i) & 1;
-            if(foundedKeyBit != inputKeyBit){
-                Insert(key, value, charIndex * BIT_COUNT + i + 1);
-                run = false;
-                break;
-            }
+    }
+
+    Node *nearest = SearchInternal(key, false).currentNode;
+
+    size_t bitIndex = 0;
+    while(true){
+        bool foundBit = GetBit(nearest->key, bitIndex);
+        bool newBit   = GetBit(key, bitIndex);
+
+        if(foundBit != newBit){
+            Insert(key, value, bitIndex);
+            return;
         }
-        ++charIndex;
+        bitIndex++;
     }
 }
 
-void Patricia::Insert(const std::string& key, const int& value, const size_t& index){
-    Node *currentNode = root->left, *prevNode = root;
+void Patricia::Insert(const std::string& key, int value, size_t index){
+    auto [currentNode, prevNode] = SearchInsertPlace(root, key, index);
 
-    while(currentNode->index > prevNode->index){
-        if(currentNode->index > index)
-            break;
+    Node* newNode = new Node(key, value, index);
+    bool b = GetBit(key, index);
 
-        size_t charIndex = (currentNode->index - 1) / BIT_COUNT;
-        // FindKey is less than need char
-        if(charIndex >= key.size()){
-            prevNode = currentNode;
-            // Only '0'
-            currentNode = currentNode->left;
-            continue;
-        }
-        char currentChar = key[charIndex]; // If findkey.size less than currentNode->index
-        int offset = (BIT_COUNT - 1 - ((currentNode->index - 1) % BIT_COUNT));
-        bool currentBit = (currentChar >> offset) & 1;
+    if(prevNode->left == currentNode) prevNode->left = newNode;
+    else                              prevNode->right = newNode;
 
-        // Remember prevNode
-        prevNode = currentNode;
-        // If '1' go right, '0' go left
-        currentBit  ? currentNode = currentNode->right
-                    : currentNode = currentNode->left;
-    }
-
-    char getCharFromKey = key[(index - 1) / BIT_COUNT];
-    bool getBit = getCharFromKey >> (BIT_COUNT - 1 - (index - 1) % BIT_COUNT) & 1;
-    Node *newNode = new Node(key, value, index);
-
-    if(prevNode->left == currentNode)
-        prevNode->left = newNode;
-    else
-        prevNode->right = newNode;
-
-    getBit  ? (newNode->right = newNode, newNode->left = currentNode)
-            : (newNode->left = newNode, newNode->right = currentNode);
+    if(b) { newNode->right = newNode; newNode->left  = currentNode; }
+    else  { newNode->left  = newNode; newNode->right = currentNode; }
 }
 
 int& Patricia::At(const std::string& findKey) const{
-    if(!root)
-        throw std::runtime_error("\t\"" + findKey + "\" hadn't found!\n");
-
     Node* get = Search(findKey);
-
-    if(get->key == findKey)
-        return get->value;
-
-    throw std::runtime_error("\t\"" + findKey + "\" hadn't found!\n");
+    if(!get)
+        throw std::runtime_error("\t\"" + findKey + "\" hadn't found!\n");
+    return get->value;
 }
 
 void Patricia::Erase(const std::string& key){
     if(!root)
         throw std::runtime_error("\t\"" + key + "\" hadn't found!\n");
 
-    // Get delete node, owner delete node and parent owner
-    std::tuple<Node*, Node*, Node*> delOwnerParentTuple = SearchE(key);
-    Node *deleteNode = std::get<0>(delOwnerParentTuple);
-    Node *ownerDeleteNode = std::get<1>(delOwnerParentTuple);
-    Node *parentOwnerDeleteNode = std::get<2>(delOwnerParentTuple);
+    auto [deleteNode, ownerDeleteNode, parentOwnerDeleteNode] = SearchE(key);
 
-    if(deleteNode->key != key)
+    if(!deleteNode || deleteNode->key != key)
         throw std::runtime_error("\t\"" + key + "\" hadn't found!\n");
-    
-    // If delete node is root and it's one
+
     if(deleteNode == root && root->left == root){
         delete root;
         root = nullptr;
@@ -174,54 +132,116 @@ void Patricia::Erase(const std::string& key){
 
     // If delete node is leaf
     if(ownerDeleteNode == deleteNode){
-        //std::cout << "[Erase] DeleteNode is leaf\n";
         if(parentOwnerDeleteNode->right == deleteNode)
-            if(deleteNode->right == deleteNode)
-                parentOwnerDeleteNode->right = deleteNode->left;
-            else
-                parentOwnerDeleteNode->right = deleteNode->right;
+            parentOwnerDeleteNode->right = (deleteNode->right == deleteNode) ? deleteNode->left : deleteNode->right;
         else
-            if(deleteNode->right == deleteNode)
-                parentOwnerDeleteNode->left = deleteNode->left;
-            else
-                parentOwnerDeleteNode->left = deleteNode->right;
+            parentOwnerDeleteNode->left  = (deleteNode->right == deleteNode) ? deleteNode->left : deleteNode->right;
+
         delete deleteNode;
         return;
     }
 
-    // Get owner owner delete node
-    std::tuple<Node*, Node*, Node*> ownerOwnerTuple = SearchE(ownerDeleteNode->key);
-    Node *ownerOwnerDelNode = std::get<1>(ownerOwnerTuple);
+    auto [__, ownerOwnerDelNode, ___] = SearchE(ownerDeleteNode->key);
 
-    // Change item from owner delete node to delete node
     deleteNode->key = ownerDeleteNode->key;
     deleteNode->value = ownerDeleteNode->value;
 
-    // If owner delete node is leaf
     if(ownerOwnerDelNode == ownerDeleteNode){
         if(parentOwnerDeleteNode->right == ownerDeleteNode)
             parentOwnerDeleteNode->right = deleteNode;
         else
             parentOwnerDeleteNode->left = deleteNode;
-    }
-    else{
-        // Tie parent owner delete node with child
+    } else {
         if(parentOwnerDeleteNode->right == ownerDeleteNode)
-            if(ownerDeleteNode->right == deleteNode)
-                parentOwnerDeleteNode->right = ownerDeleteNode->left;
-            else
-                parentOwnerDeleteNode->right = ownerDeleteNode->right;
+            parentOwnerDeleteNode->right = (ownerDeleteNode->right == deleteNode) ? ownerDeleteNode->left : ownerDeleteNode->right;
         else
-            if(ownerDeleteNode->right == deleteNode)
-                parentOwnerDeleteNode->left = ownerDeleteNode->left;
-            else
-                parentOwnerDeleteNode->left = ownerDeleteNode->right;
+            parentOwnerDeleteNode->left  = (ownerDeleteNode->right == deleteNode) ? ownerDeleteNode->left : ownerDeleteNode->right;
 
         if(ownerOwnerDelNode->right == ownerDeleteNode)
             ownerOwnerDelNode->right = deleteNode;
         else
             ownerOwnerDelNode->left = deleteNode;
     }
+
     delete ownerDeleteNode;
 }
-    
+
+void Patricia::Clear() {
+    if(!root) return;
+
+    std::unordered_set<Node*> visited;
+    std::vector<Node*> stack;
+    stack.push_back(root);
+
+    while(!stack.empty()) {
+        Node* n = stack.back();
+        stack.pop_back();
+        if(!n) continue;
+        if(visited.insert(n).second == false) continue;
+
+        // добавляем детей, но не боимся self/циклов — visited защитит
+        if(n->left)  stack.push_back(n->left);
+        if(n->right) stack.push_back(n->right);
+    }
+
+    // удаляем после обхода
+    for(Node* n : visited) {
+        delete n;
+    }
+
+    root = nullptr;
+}
+
+void Patricia::PrintTree() const {
+    if(!root) {
+        std::cout << "Empty tree" << std::endl;
+        return;
+    }
+
+    std::cout << "\n=== Tree Structure ===" << std::endl;
+
+    std::queue<Node*> q;
+    std::unordered_set<Node*> visited;
+
+    q.push(root);
+    visited.insert(root);
+
+    while(!q.empty()) {
+        Node* current = q.front();
+        q.pop();
+
+        std::cout << "Node: key=\"" << current->key << "\""
+                  << ", value=" << current->value
+                  << ", index=" << current->index;
+
+        if(current->left == current) {
+            std::cout << ", left=self";
+        } else if(current->left) {
+            std::cout << ", left=\"" << current->left->key << "\"";
+        } else {
+            std::cout << ", left=null";
+        }
+
+        if(current->right == current) {
+            std::cout << ", right=self";
+        } else if(current->right) {
+            std::cout << ", right=\"" << current->right->key << "\"";
+        } else {
+            std::cout << ", right=null";
+        }
+
+        std::cout << std::endl;
+
+        if(current->left && current->left != current && !visited.count(current->left)) {
+            visited.insert(current->left);
+            q.push(current->left);
+        }
+
+        if(current->right && current->right != current && !visited.count(current->right)) {
+            visited.insert(current->right);
+            q.push(current->right);
+        }
+    }
+
+    std::cout << "===================\n" << std::endl;
+}
